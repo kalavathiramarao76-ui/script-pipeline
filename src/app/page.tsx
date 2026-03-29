@@ -1,258 +1,295 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import AgentCard from '@/components/AgentCard';
-
-interface AgentResult {
-  agentId: number;
-  agentName: string;
-  phase: string;
-  output: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  error?: string;
-}
+import Tabs from '@/components/Tabs';
+import PipelineView from '@/components/PipelineView';
+import HistoryView from '@/components/HistoryView';
 
 interface PipelineState {
   id: string;
-  status: 'idle' | 'running' | 'completed' | 'failed';
-  results: Record<number, AgentResult>;
+  title: string;
+  status: string;
+  results: Record<number, unknown>;
   currentAgent: number;
+  currentStep: number;
+  totalSteps: number;
   error?: string;
+  startedAt?: string;
+  completedAt?: string;
+  finalScript?: string;
+  input: { productBrief: string; targetLength: string; format?: string };
 }
 
-const PHASES = [
-  { num: 1, name: 'Research', agents: [1, 2, 3, 4] },
-  { num: 2, name: 'Strategy', agents: [5, 6, 7] },
-  { num: 3, name: 'Writing', agents: [8, 9, 10, 11, 12, 13] },
-  { num: 4, name: 'Quality Control', agents: [14, 15, 16, 17] },
-  { num: 5, name: 'Assembly', agents: [18, 19, 20] },
-];
-
 export default function Home() {
+  const [tab, setTab] = useState('new');
   const [productBrief, setProductBrief] = useState('');
   const [targetLength, setTargetLength] = useState('60 seconds, approximately 150 words');
   const [format, setFormat] = useState('YouTube ad');
   const [pipelineId, setPipelineId] = useState<string | null>(null);
-  const [state, setState] = useState<PipelineState | null>(null);
+  const [pipelineState, setPipelineState] = useState<PipelineState | null>(null);
   const [starting, setStarting] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [finalScript, setFinalScript] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
 
+  // Check if API key is configured
   useEffect(() => {
-    if (pipelineId && state?.status === 'running') {
-      pollRef.current = setInterval(async () => {
-        const res = await fetch('/api/pipeline', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'status', pipelineId }),
-        });
-        const data = await res.json();
-        if (data.state) {
-          setState(data.state);
-          if (data.state.status !== 'running') {
-            if (pollRef.current) clearInterval(pollRef.current);
-            if (data.state.status === 'completed' && data.state.results[20]?.output) {
-              setFinalScript(data.state.results[20].output);
-            }
-          }
-        }
-      }, 2000);
-      return () => {
-        if (pollRef.current) clearInterval(pollRef.current);
-      };
-    }
-  }, [pipelineId, state?.status]);
+    fetch('/api/settings')
+      .then(r => r.json())
+      .then(data => setHasKey(data.hasKey || false))
+      .catch(() => setHasKey(false));
+  }, []);
 
   async function handleStart() {
     if (!productBrief.trim()) return;
     setStarting(true);
-    setFinalScript(null);
+    setError(null);
 
-    const createRes = await fetch('/api/pipeline', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'create', productBrief, targetLength, format }),
-    });
-    const createData = await createRes.json();
+    try {
+      // Create pipeline
+      const createRes = await fetch('/api/pipeline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'create', productBrief, targetLength, format }),
+      });
+      const createData = await createRes.json();
 
-    if (createData.error) {
-      alert(createData.error);
+      if (createData.error) {
+        setError(createData.error);
+        setStarting(false);
+        return;
+      }
+
+      const newId = createData.pipelineId;
+      setPipelineId(newId);
+
+      // Run pipeline
+      const runRes = await fetch('/api/pipeline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'run', pipelineId: newId }),
+      });
+      const runData = await runRes.json();
+
+      if (runData.error) {
+        setError(runData.error);
+        setStarting(false);
+        return;
+      }
+
+      // Fetch initial running state
+      const statusRes = await fetch('/api/pipeline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'status', pipelineId: newId }),
+      });
+      const statusData = await statusRes.json();
+      setPipelineState(statusData.state);
+      setTab('pipeline');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Network error');
+    } finally {
       setStarting(false);
-      return;
     }
-
-    setPipelineId(createData.pipelineId);
-    setState(createData.state);
-
-    const runRes = await fetch('/api/pipeline', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'run', pipelineId: createData.pipelineId }),
-    });
-    const runData = await runRes.json();
-
-    if (runData.error) {
-      alert(runData.error);
-      setStarting(false);
-      return;
-    }
-
-    setStarting(false);
   }
 
-  const completedCount = state
-    ? Object.values(state.results).filter(r => r.status === 'completed').length
-    : 0;
-  const runningCount = state
-    ? Object.values(state.results).filter(r => r.status === 'running').length
-    : 0;
+  async function handleLoadPipeline(id: string) {
+    try {
+      const res = await fetch('/api/pipeline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'status', pipelineId: id }),
+      });
+      const data = await res.json();
+      if (data.state) {
+        setPipelineId(id);
+        setPipelineState(data.state);
+        setTab('pipeline');
+      } else {
+        setError('Pipeline not found or expired');
+      }
+    } catch {
+      setError('Failed to load pipeline');
+    }
+  }
+
+  function handleReset() {
+    setPipelineId(null);
+    setPipelineState(null);
+    setProductBrief('');
+    setError(null);
+    setTab('new');
+  }
+
+  const tabs = [
+    { id: 'new', label: 'New Pipeline' },
+    ...(pipelineState ? [{ id: 'pipeline', label: 'Current Run' }] : []),
+    { id: 'history', label: 'History' },
+  ];
 
   return (
     <div className="min-h-screen bg-gray-950 text-white">
-      <div className="max-w-5xl mx-auto p-6">
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <h1 className="text-3xl font-bold">20-Agent Script Pipeline</h1>
-            <p className="text-gray-400 mt-1">AI-powered script writing system with quality gates</p>
-          </div>
-          <Link
-            href="/settings"
-            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm transition border border-gray-700"
-          >
-            AI Settings
-          </Link>
-        </div>
-
-        {!state && (
-          <div className="bg-gray-900 rounded-xl p-6 border border-gray-800 mb-8">
-            <h2 className="text-lg font-semibold mb-4">Product Brief</h2>
-            <textarea
-              value={productBrief}
-              onChange={e => setProductBrief(e.target.value)}
-              placeholder={`Describe your product:\n- Brand name and what it does\n- Key features and differentiators\n- Target audience\n- What problem it solves\n- What makes it different from competitors`}
-              className="w-full h-48 px-4 py-3 bg-gray-950 border border-gray-700 rounded-lg text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 resize-none"
-            />
-
-            <div className="grid grid-cols-2 gap-4 mt-4">
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Target Length</label>
-                <select
-                  value={targetLength}
-                  onChange={e => setTargetLength(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-950 border border-gray-700 rounded-lg text-white text-sm"
-                >
-                  <option value="30 seconds, approximately 75 words">30 seconds (~75 words)</option>
-                  <option value="60 seconds, approximately 150 words">60 seconds (~150 words)</option>
-                  <option value="90 seconds, approximately 225 words">90 seconds (~225 words)</option>
-                  <option value="2 minutes, approximately 300 words">2 minutes (~300 words)</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Format</label>
-                <select
-                  value={format}
-                  onChange={e => setFormat(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-950 border border-gray-700 rounded-lg text-white text-sm"
-                >
-                  <option>YouTube ad</option>
-                  <option>TikTok</option>
-                  <option>Instagram Reel</option>
-                  <option>Product launch video</option>
-                  <option>Explainer video</option>
-                  <option>Testimonial-style</option>
-                </select>
-              </div>
+      {/* Top Bar */}
+      <header className="border-b border-gray-800 bg-gray-950/80 backdrop-blur-sm sticky top-0 z-50">
+        <div className="max-w-5xl mx-auto px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-sm font-bold">
+              20
             </div>
-
-            <button
-              onClick={handleStart}
-              disabled={starting || !productBrief.trim()}
-              className="w-full mt-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 rounded-lg font-semibold text-lg transition"
+            <div>
+              <h1 className="text-base font-semibold text-white leading-tight">Script Pipeline</h1>
+              <p className="text-xs text-gray-500">20-Agent AI Writing System</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            {hasKey === false && (
+              <span className="text-xs text-red-400 bg-red-500/10 px-2 py-1 rounded">No API key</span>
+            )}
+            {hasKey === true && (
+              <span className="text-xs text-green-400 bg-green-500/10 px-2 py-1 rounded">AI connected</span>
+            )}
+            <Link
+              href="/settings"
+              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-xs text-gray-300 transition border border-gray-700"
             >
-              {starting ? 'Initializing Pipeline...' : 'Run 20-Agent Pipeline'}
-            </button>
+              Settings
+            </Link>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-5xl mx-auto px-6 py-6">
+        {/* Error Banner */}
+        {error && (
+          <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 mb-6 flex items-center justify-between">
+            <p className="text-red-400 text-sm">{error}</p>
+            <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300 text-sm ml-4">Dismiss</button>
           </div>
         )}
 
-        {state && (
-          <>
-            <div className="bg-gray-900 rounded-xl p-4 border border-gray-800 mb-6">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-gray-400">
-                  Pipeline:{' '}
-                  <span className={
-                    state.status === 'running' ? 'text-yellow-400' :
-                    state.status === 'completed' ? 'text-green-400' :
-                    state.status === 'failed' ? 'text-red-400' : 'text-gray-400'
-                  }>{state.status}</span>
-                </span>
-                <span className="text-sm text-gray-400">
-                  {completedCount}/20 agents {runningCount > 0 && `(${runningCount} running)`}
-                </span>
-              </div>
-              <div className="w-full bg-gray-700 rounded-full h-2">
-                <div
-                  className={`h-2 rounded-full transition-all duration-500 ${
-                    state.status === 'failed' ? 'bg-red-500' : 'bg-blue-500'
-                  }`}
-                  style={{ width: `${(completedCount / 20) * 100}%` }}
-                />
-              </div>
+        {/* Tabs */}
+        <Tabs tabs={tabs} active={tab} onChange={setTab} />
 
-              {state.status !== 'running' && (
-                <button
-                  onClick={() => { setState(null); setPipelineId(null); setFinalScript(null); }}
-                  className="mt-3 text-sm text-blue-400 hover:text-blue-300"
-                >
-                  Start New Pipeline
-                </button>
-              )}
-            </div>
-
-            {finalScript && (
-              <div className="bg-gray-900 rounded-xl p-6 border border-green-700 mb-6">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-bold text-green-400">Final Script</h2>
-                  <button
-                    onClick={() => navigator.clipboard.writeText(finalScript)}
-                    className="px-3 py-1 bg-gray-800 hover:bg-gray-700 rounded text-sm transition"
-                  >
-                    Copy
-                  </button>
-                </div>
-                <pre className="text-sm text-gray-200 whitespace-pre-wrap leading-relaxed">
-                  {finalScript}
-                </pre>
+        {/* New Pipeline Tab */}
+        {tab === 'new' && (
+          <div className="max-w-3xl">
+            {hasKey === false && (
+              <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4 mb-6">
+                <p className="text-yellow-400 text-sm font-medium">Configure your AI provider first</p>
+                <p className="text-yellow-400/70 text-xs mt-1">
+                  Go to <Link href="/settings" className="underline">Settings</Link> to set up Grok, OpenAI, Claude, or a custom AI provider.
+                </p>
               </div>
             )}
 
-            {PHASES.map(phase => (
-              <div key={phase.num} className="mb-6">
-                <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
-                  Phase {phase.num}: {phase.name}
-                </h2>
-                <div className="grid gap-2">
-                  {phase.agents.map(agentId => {
-                    const result = state.results[agentId];
-                    return result ? (
-                      <AgentCard
-                        key={agentId}
-                        agentId={agentId}
-                        name={result.agentName}
-                        phase={result.phase}
-                        status={result.status}
-                        output={result.output}
-                        error={result.error}
-                      />
-                    ) : null;
-                  })}
+            <div className="space-y-5">
+              {/* Product Brief */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Product Brief</label>
+                <textarea
+                  value={productBrief}
+                  onChange={e => setProductBrief(e.target.value)}
+                  placeholder={`Enter your product brief here. Include:\n\n- Brand name and what the product does\n- Key features and differentiators\n- Target audience (who they are, what frustrates them)\n- What makes this product different from competitors\n- Any existing brand voice or tone guidelines`}
+                  className="w-full h-56 px-4 py-3 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/50 resize-none text-sm leading-relaxed transition"
+                />
+                <div className="flex justify-between mt-1.5">
+                  <p className="text-xs text-gray-600">The more detail you provide, the better your script will be</p>
+                  <p className="text-xs text-gray-600">{productBrief.length > 0 ? `${productBrief.split(/\s+/).filter(Boolean).length} words` : ''}</p>
                 </div>
               </div>
-            ))}
-          </>
+
+              {/* Options Grid */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-gray-400 mb-1.5">Script Length</label>
+                  <select
+                    value={targetLength}
+                    onChange={e => setTargetLength(e.target.value)}
+                    className="w-full px-3 py-2.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500 transition"
+                  >
+                    <option value="15 seconds, approximately 40 words">15 sec (~40 words)</option>
+                    <option value="30 seconds, approximately 75 words">30 sec (~75 words)</option>
+                    <option value="60 seconds, approximately 150 words">60 sec (~150 words)</option>
+                    <option value="90 seconds, approximately 225 words">90 sec (~225 words)</option>
+                    <option value="2 minutes, approximately 300 words">2 min (~300 words)</option>
+                    <option value="3 minutes, approximately 450 words">3 min (~450 words)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-400 mb-1.5">Content Format</label>
+                  <select
+                    value={format}
+                    onChange={e => setFormat(e.target.value)}
+                    className="w-full px-3 py-2.5 bg-gray-900 border border-gray-800 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500 transition"
+                  >
+                    <option>YouTube ad</option>
+                    <option>YouTube long-form</option>
+                    <option>TikTok</option>
+                    <option>Instagram Reel</option>
+                    <option>Facebook ad</option>
+                    <option>Product launch video</option>
+                    <option>Explainer video</option>
+                    <option>Testimonial-style</option>
+                    <option>Sales page video</option>
+                    <option>Webinar intro</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Pipeline Overview */}
+              <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <p className="text-xs font-medium text-gray-400 mb-3">Pipeline will run 20 agents in 5 phases:</p>
+                <div className="grid grid-cols-5 gap-2">
+                  {[
+                    { n: '1', label: 'Research', sub: '4 agents', color: 'blue' },
+                    { n: '2', label: 'Strategy', sub: '3 agents', color: 'purple' },
+                    { n: '3', label: 'Writing', sub: '6 agents', color: 'yellow' },
+                    { n: '4', label: 'QC', sub: '4 agents', color: 'orange' },
+                    { n: '5', label: 'Assembly', sub: '3 agents', color: 'green' },
+                  ].map(p => (
+                    <div key={p.n} className="text-center">
+                      <div className={`w-8 h-8 rounded-lg mx-auto mb-1 flex items-center justify-center text-xs font-bold bg-${p.color}-500/20 text-${p.color}-400`}>
+                        {p.n}
+                      </div>
+                      <p className="text-xs text-gray-300">{p.label}</p>
+                      <p className="text-xs text-gray-600">{p.sub}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Run Button */}
+              <button
+                onClick={handleStart}
+                disabled={starting || !productBrief.trim() || hasKey === false}
+                className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-600 rounded-lg font-semibold transition text-sm"
+              >
+                {starting ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <span className="animate-spin">~</span> Initializing Pipeline...
+                  </span>
+                ) : (
+                  'Launch 20-Agent Pipeline'
+                )}
+              </button>
+            </div>
+          </div>
         )}
-      </div>
+
+        {/* Pipeline View Tab */}
+        {tab === 'pipeline' && pipelineState && pipelineId && (
+          <PipelineView
+            pipelineId={pipelineId}
+            initialState={pipelineState as Parameters<typeof PipelineView>[0]['initialState']}
+            onReset={handleReset}
+          />
+        )}
+
+        {/* History Tab */}
+        {tab === 'history' && (
+          <HistoryView onLoad={handleLoadPipeline} />
+        )}
+      </main>
     </div>
   );
 }

@@ -5,7 +5,7 @@ import { AISettings, callAI } from './ai-provider';
 
 export interface PipelineInput {
   productBrief: string;
-  targetLength: string; // e.g., "60 seconds, approximately 150 words"
+  targetLength: string;
   brandExamples?: string;
   format?: string;
 }
@@ -14,28 +14,36 @@ export interface AgentResult {
   agentId: number;
   agentName: string;
   phase: string;
+  phaseNumber: number;
   output: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
   error?: string;
   startedAt?: string;
   completedAt?: string;
+  duration?: number; // ms
+  tokenEstimate?: number;
+  retryCount: number;
 }
 
 export interface PipelineState {
   id: string;
+  title: string;
   input: PipelineInput;
   results: Record<number, AgentResult>;
   currentAgent: number;
-  status: 'idle' | 'running' | 'completed' | 'failed';
+  currentStep: number;
+  totalSteps: number;
+  status: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled';
   error?: string;
   startedAt?: string;
   completedAt?: string;
+  finalScript?: string;
 }
 
 function resolvePrompt(agent: AgentDef, context: Record<string, string>): string {
   let prompt = agent.prompt;
   for (const [key, value] of Object.entries(context)) {
-    prompt = prompt.replace(new RegExp(`{{${key}}}`, 'g'), value || '[Not available]');
+    prompt = prompt.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), value || '[Not available]');
   }
   return prompt;
 }
@@ -50,16 +58,14 @@ function buildContext(
     targetLength: input.targetLength,
   };
 
-  // Map agent outputs
   for (const dep of agent.inputs) {
     if (dep === 'productBrief' || dep === 'targetLength') continue;
 
     if (dep === 'assembledScript') {
-      // For QC agents, assemble the script from hook + body + CTA
       const hook = results[9]?.output || '';
       const body = results[11]?.output || '';
       const cta = results[13]?.output || '';
-      ctx.assembledScript = `${hook}\n\n---\n\n${body}\n\n---\n\n${cta}`;
+      ctx.assembledScript = `HOOK:\n${hook}\n\nBODY:\n${body}\n\nCTA:\n${cta}`;
       continue;
     }
 
@@ -82,29 +88,28 @@ export async function runAgent(
   const context = buildContext(agent, input, results);
   const resolvedPrompt = resolvePrompt(agent, context);
 
-  const systemPrompt = `You are ${agent.role}. You are Agent ${agent.id} of 20 in a professional script writing pipeline. Phase: ${agent.phase}. Your output will be used by subsequent agents, so be thorough, structured, and specific.`;
+  const systemPrompt = `You are ${agent.role}. You are Agent ${agent.id} of 20 in a professional script writing pipeline. Phase: ${agent.phase} (Phase ${agent.phaseNumber} of 5). Your output will be used by subsequent agents, so be thorough, structured, and specific. Do not include meta-commentary about the pipeline itself — just do your job excellently.`;
 
   return callAI(aiSettings, systemPrompt, resolvedPrompt);
 }
 
-// Get the execution order - some agents can run in parallel
-export function getExecutionPlan(): { step: number; agents: number[] }[] {
+export function getExecutionPlan(): { step: number; agents: number[]; description: string }[] {
   return [
-    { step: 1, agents: [1, 2, 3] },        // Research (parallel)
-    { step: 2, agents: [4] },               // Research Synthesis
-    { step: 3, agents: [5, 7] },            // Audience Profile + Brand Voice (parallel)
-    { step: 4, agents: [6] },               // Angle Selection (needs agent 5)
-    { step: 5, agents: [8] },               // Hook Writer
-    { step: 6, agents: [9] },               // Hook Manager
-    { step: 7, agents: [10] },              // Body Writer
-    { step: 8, agents: [11] },              // Body Manager
-    { step: 9, agents: [12] },              // CTA Writer
-    { step: 10, agents: [13] },             // CTA Manager
-    { step: 11, agents: [14, 15, 16] },     // QC checks (parallel)
-    { step: 12, agents: [17] },             // Budget Enforcer
-    { step: 13, agents: [18] },             // Script Assembler
-    { step: 14, agents: [19] },             // Transition Polisher
-    { step: 15, agents: [20] },             // Final Review
+    { step: 1, agents: [1, 2, 3], description: 'Platform Research (YouTube, Reddit, X)' },
+    { step: 2, agents: [4], description: 'Research Synthesis' },
+    { step: 3, agents: [5, 7], description: 'Audience Profile + Brand Voice' },
+    { step: 4, agents: [6], description: 'Angle Selection' },
+    { step: 5, agents: [8], description: 'Hook Writing' },
+    { step: 6, agents: [9], description: 'Hook Quality Gate' },
+    { step: 7, agents: [10], description: 'Body Writing' },
+    { step: 8, agents: [11], description: 'Body Quality Gate' },
+    { step: 9, agents: [12], description: 'CTA Writing' },
+    { step: 10, agents: [13], description: 'CTA Quality Gate' },
+    { step: 11, agents: [14, 15, 16], description: 'Quality Control Checks' },
+    { step: 12, agents: [17], description: 'Budget Enforcement' },
+    { step: 13, agents: [18], description: 'Script Assembly' },
+    { step: 14, agents: [19], description: 'Transition Polish' },
+    { step: 15, agents: [20], description: 'Final Review' },
   ];
 }
 
@@ -115,18 +120,32 @@ export function createPipelineState(input: PipelineInput): PipelineState {
       agentId: agent.id,
       agentName: agent.name,
       phase: agent.phase,
+      phaseNumber: agent.phaseNumber,
       output: '',
       status: 'pending',
+      retryCount: 0,
     };
   }
 
+  // Generate a short title from the product brief
+  const title = input.productBrief.substring(0, 60).replace(/\n/g, ' ').trim() + (input.productBrief.length > 60 ? '...' : '');
+
   return {
     id: crypto.randomUUID(),
+    title,
     input,
     results,
     currentAgent: 0,
+    currentStep: 0,
+    totalSteps: 15,
     status: 'idle',
-    startedAt: undefined,
-    completedAt: undefined,
   };
+}
+
+export function extractFinalScript(state: PipelineState): string | undefined {
+  // Try agent 20 first, then fall back through the chain
+  if (state.results[20]?.output) return state.results[20].output;
+  if (state.results[19]?.output) return state.results[19].output;
+  if (state.results[18]?.output) return state.results[18].output;
+  return undefined;
 }
