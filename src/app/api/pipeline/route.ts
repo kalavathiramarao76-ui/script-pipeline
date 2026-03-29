@@ -1,11 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AGENTS } from '@/lib/agents';
-import { loadSettings } from '@/lib/settings-store';
 import { runAgent, createPipelineState, getExecutionPlan, extractFinalScript, PipelineState } from '@/lib/pipeline';
 import { AISettings } from '@/lib/ai-provider';
 import store from '@/lib/pipeline-store';
 
 export const maxDuration = 300; // 5 min max for Vercel
+
+function parseSettings(body: Record<string, unknown>): AISettings | null {
+  const s = body.aiSettings as Record<string, unknown> | undefined;
+  if (!s || !s.apiKey) return null;
+  return {
+    provider: (s.provider as AISettings['provider']) || 'groq',
+    apiKey: s.apiKey as string,
+    model: (s.model as string) || 'llama-3.3-70b-versatile',
+    baseUrl: (s.baseUrl as string) || undefined,
+    temperature: (s.temperature as number) ?? 0.7,
+    maxTokens: (s.maxTokens as number) ?? 4096,
+  };
+}
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
@@ -17,9 +29,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Product brief is required' }, { status: 400 });
     }
 
-    const settings = await loadSettings();
-    if (!settings.apiKey) {
-      return NextResponse.json({ error: 'No AI API key configured. Go to Settings to set up your AI provider.' }, { status: 400 });
+    const settings = parseSettings(body);
+    if (!settings) {
+      return NextResponse.json({ error: 'No AI settings provided. Go to Settings to configure your AI provider.' }, { status: 400 });
     }
 
     const state = createPipelineState({
@@ -50,9 +62,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Pipeline is already running' }, { status: 400 });
     }
 
-    const settings = await loadSettings();
-    if (!settings.apiKey) {
-      return NextResponse.json({ error: 'No AI API key configured. Go to Settings first.' }, { status: 400 });
+    const settings = parseSettings(body);
+    if (!settings) {
+      return NextResponse.json({ error: 'No AI settings provided. Go to Settings to configure your AI provider.' }, { status: 400 });
     }
 
     // Mark as running BEFORE returning response
@@ -87,7 +99,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Pipeline not found' }, { status: 404 });
     }
 
-    const settings = await loadSettings();
+    const settings = parseSettings(body);
+    if (!settings) {
+      return NextResponse.json({ error: 'No AI settings provided.' }, { status: 400 });
+    }
+
     const agent = AGENTS.find(a => a.id === agentId);
     if (!agent) {
       return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
@@ -137,7 +153,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Pipeline not found' }, { status: 404 });
     }
 
-    // Build export document
     const script = extractFinalScript(state);
     const doc = {
       title: state.title,
@@ -153,6 +168,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ export: doc });
   }
 
+  if (action === 'test') {
+    const settings = parseSettings(body);
+    if (!settings) {
+      return NextResponse.json({ error: 'No AI settings provided.' }, { status: 400 });
+    }
+
+    // Quick test call
+    try {
+      const { callAI } = await import('@/lib/ai-provider');
+      const result = await callAI(settings, 'You are a test assistant.', 'Reply with exactly: "Connection successful." Nothing else.');
+      return NextResponse.json({ success: true, message: `AI responded: ${result.substring(0, 100)}` });
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+      return NextResponse.json({ error: errorMsg }, { status: 500 });
+    }
+  }
+
   return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
 }
 
@@ -160,12 +192,10 @@ async function runPipelineAsync(state: PipelineState, settings: AISettings) {
   const plan = getExecutionPlan();
 
   for (const step of plan) {
-    // Check if cancelled
     if (state.status === 'cancelled') return;
 
     state.currentStep = step.step;
 
-    // Run agents in this step in parallel
     const promises = step.agents.map(async (agentId) => {
       if (state.status === 'cancelled') return;
 
@@ -190,7 +220,7 @@ async function runPipelineAsync(state: PipelineState, settings: AISettings) {
         result.error = errorMsg;
         result.duration = Date.now() - startTime;
 
-        // Auto-retry once on failure
+        // Auto-retry once
         if (result.retryCount < 1) {
           result.retryCount += 1;
           result.status = 'running';
@@ -213,7 +243,6 @@ async function runPipelineAsync(state: PipelineState, settings: AISettings) {
 
     await Promise.all(promises);
 
-    // Check if any agent in this step failed
     const failedAgents = step.agents.filter(id => state.results[id].status === 'failed');
     if (failedAgents.length > 0) {
       state.status = 'failed';

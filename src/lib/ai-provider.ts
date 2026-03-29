@@ -1,18 +1,18 @@
 // AI Provider abstraction - supports multiple AI backends
 
 export interface AISettings {
-  provider: 'openai' | 'anthropic' | 'grok' | 'custom';
+  provider: 'openai' | 'anthropic' | 'grok' | 'groq' | 'custom';
   apiKey: string;
   model: string;
-  baseUrl?: string; // for custom providers
+  baseUrl?: string;
   temperature?: number;
   maxTokens?: number;
 }
 
 const DEFAULT_SETTINGS: AISettings = {
-  provider: 'grok',
+  provider: 'groq',
   apiKey: '',
-  model: 'grok-3',
+  model: 'openai/gpt-oss-20b',
   temperature: 0.7,
   maxTokens: 4096,
 };
@@ -25,6 +25,8 @@ export function getProviderDefaults(provider: string): Partial<AISettings> {
       return { model: 'claude-sonnet-4-20250514', baseUrl: 'https://api.anthropic.com/v1' };
     case 'grok':
       return { model: 'grok-3', baseUrl: 'https://api.x.ai/v1' };
+    case 'groq':
+      return { model: 'llama-3.3-70b-versatile', baseUrl: 'https://api.groq.com/openai/v1' };
     case 'custom':
       return { model: '', baseUrl: '' };
     default:
@@ -47,8 +49,9 @@ export async function callAI(
     return callAnthropic(apiKey, model, systemPrompt, userPrompt, temperature, maxTokens);
   }
 
-  // OpenAI-compatible API (works for OpenAI, Grok/xAI, and most custom providers)
-  const url = `${baseUrl || getDefaultBaseUrl(provider)}/chat/completions`;
+  // OpenAI-compatible API (works for OpenAI, Grok/xAI, Groq, and custom providers)
+  const resolvedBaseUrl = baseUrl || getDefaultBaseUrl(provider);
+  const url = `${resolvedBaseUrl}/chat/completions`;
 
   const response = await fetch(url, {
     method: 'POST',
@@ -113,6 +116,7 @@ function getDefaultBaseUrl(provider: string): string {
   switch (provider) {
     case 'openai': return 'https://api.openai.com/v1';
     case 'grok': return 'https://api.x.ai/v1';
+    case 'groq': return 'https://api.groq.com/openai/v1';
     default: return '';
   }
 }

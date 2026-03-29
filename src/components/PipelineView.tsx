@@ -93,10 +93,12 @@ export default function PipelineView({ pipelineId, initialState, onReset }: Pipe
   }
 
   async function handleRetryAgent(agentId: number) {
+    let aiSettings = null;
+    try { aiSettings = JSON.parse(localStorage.getItem('ai-settings') || ''); } catch { /* */ }
     await fetch('/api/pipeline', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'retry-agent', pipelineId, agentId }),
+      body: JSON.stringify({ action: 'retry-agent', pipelineId, agentId, aiSettings }),
     });
     poll();
   }

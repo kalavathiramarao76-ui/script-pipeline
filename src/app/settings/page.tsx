@@ -4,37 +4,47 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 
 const PROVIDERS = [
-  { id: 'grok', name: 'Grok (xAI)', desc: 'Fast, great for creative writing', models: ['grok-3', 'grok-3-mini', 'grok-2'], baseUrl: 'https://api.x.ai/v1' },
+  { id: 'groq', name: 'Groq', desc: 'Fast inference - Llama, Mixtral, GPT-OSS', models: ['llama-3.3-70b-versatile', 'openai/gpt-oss-20b', 'openai/gpt-oss-120b', 'mixtral-8x7b-32768', 'llama-3.1-8b-instant', 'gemma2-9b-it'], baseUrl: 'https://api.groq.com/openai/v1' },
+  { id: 'grok', name: 'Grok (xAI)', desc: 'xAI models, great for creative', models: ['grok-3', 'grok-3-mini', 'grok-2'], baseUrl: 'https://api.x.ai/v1' },
   { id: 'openai', name: 'OpenAI', desc: 'GPT-4o and latest models', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1', 'o3-mini'], baseUrl: 'https://api.openai.com/v1' },
   { id: 'anthropic', name: 'Anthropic', desc: 'Claude models, excellent reasoning', models: ['claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'claude-haiku-4-5-20251001'], baseUrl: 'https://api.anthropic.com/v1' },
   { id: 'custom', name: 'Custom', desc: 'Any OpenAI-compatible API', models: [], baseUrl: '' },
 ];
 
+function loadSettingsFromLS() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem('ai-settings');
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function saveSettingsToLS(settings: Record<string, unknown>) {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem('ai-settings', JSON.stringify(settings));
+}
+
 export default function SettingsPage() {
-  const [provider, setProvider] = useState('grok');
+  const [provider, setProvider] = useState('groq');
   const [apiKey, setApiKey] = useState('');
-  const [model, setModel] = useState('grok-3');
-  const [baseUrl, setBaseUrl] = useState('https://api.x.ai/v1');
+  const [model, setModel] = useState('llama-3.3-70b-versatile');
+  const [baseUrl, setBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(4096);
-  const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [hasKey, setHasKey] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
   useEffect(() => {
-    fetch('/api/settings')
-      .then(r => r.json())
-      .then(data => {
-        setProvider(data.provider || 'grok');
-        setApiKey(data.apiKey || '');
-        setModel(data.model || 'grok-3');
-        setBaseUrl(data.baseUrl || '');
-        setTemperature(data.temperature ?? 0.7);
-        setMaxTokens(data.maxTokens ?? 4096);
-        setHasKey(data.hasKey || false);
-      });
+    const s = loadSettingsFromLS();
+    if (s) {
+      setProvider(s.provider || 'groq');
+      setApiKey(s.apiKey || '');
+      setModel(s.model || 'llama-3.3-70b-versatile');
+      setBaseUrl(s.baseUrl || 'https://api.groq.com/openai/v1');
+      setTemperature(s.temperature ?? 0.7);
+      setMaxTokens(s.maxTokens ?? 4096);
+    }
   }, []);
 
   const selectedProvider = PROVIDERS.find(p => p.id === provider);
@@ -50,51 +60,41 @@ export default function SettingsPage() {
     setTestResult(null);
   }
 
-  async function handleSave() {
-    setSaving(true);
-    setTestResult(null);
-    await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, apiKey, model, baseUrl, temperature, maxTokens }),
-    });
-    setSaving(false);
+  function handleSave() {
+    const settings = { provider, apiKey, model, baseUrl, temperature, maxTokens };
+    saveSettingsToLS(settings);
     setSaved(true);
-    setHasKey(!!apiKey && !apiKey.startsWith('••••'));
+    setTestResult(null);
     setTimeout(() => setSaved(false), 3000);
   }
 
   async function handleTest() {
+    // Save first
+    const settings = { provider, apiKey, model, baseUrl, temperature, maxTokens };
+    saveSettingsToLS(settings);
+
     setTesting(true);
     setTestResult(null);
-    // Save first, then test
-    await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, apiKey, model, baseUrl, temperature, maxTokens }),
-    });
 
     try {
       const res = await fetch('/api/pipeline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'create',
-          productBrief: 'Test connection - this is a test product brief to verify the AI provider is working.',
-          targetLength: '30 seconds',
-        }),
+        body: JSON.stringify({ action: 'test', aiSettings: settings }),
       });
       const data = await res.json();
       if (data.error) {
         setTestResult({ ok: false, msg: data.error });
       } else {
-        setTestResult({ ok: true, msg: `Connected successfully. Pipeline created (${data.pipelineId.slice(0, 8)}...)` });
+        setTestResult({ ok: true, msg: data.message || 'Connection successful!' });
       }
     } catch (err) {
       setTestResult({ ok: false, msg: err instanceof Error ? err.message : 'Connection failed' });
     }
     setTesting(false);
   }
+
+  const hasKey = !!apiKey && apiKey.length > 5;
 
   return (
     <div className="min-h-screen bg-gray-950 text-white">
@@ -108,16 +108,21 @@ export default function SettingsPage() {
             </Link>
             <h1 className="text-base font-semibold">AI Provider Settings</h1>
           </div>
-          {hasKey && <span className="text-xs text-green-400 bg-green-500/10 px-2 py-1 rounded">Connected</span>}
+          {hasKey && <span className="text-xs text-green-400 bg-green-500/10 px-2 py-1 rounded">Key saved</span>}
         </div>
       </header>
 
       <div className="max-w-2xl mx-auto px-6 py-8">
         <div className="space-y-6">
+          {/* Info box */}
+          <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3">
+            <p className="text-blue-300 text-xs">Settings are stored in your browser (localStorage). Your API key never leaves your browser except to call the AI provider directly through our API route.</p>
+          </div>
+
           {/* Provider Selection */}
           <div>
             <label className="block text-xs font-medium text-gray-400 mb-2 uppercase tracking-wider">Provider</label>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {PROVIDERS.map(p => (
                 <button
                   key={p.id}
@@ -146,6 +151,7 @@ export default function SettingsPage() {
               className="w-full px-4 py-2.5 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/50 text-sm transition"
             />
             <p className="text-xs text-gray-600 mt-1.5">
+              {provider === 'groq' && 'Get your key at console.groq.com/keys'}
               {provider === 'grok' && 'Get your key at console.x.ai'}
               {provider === 'openai' && 'Get your key at platform.openai.com/api-keys'}
               {provider === 'anthropic' && 'Get your key at console.anthropic.com'}
@@ -157,15 +163,27 @@ export default function SettingsPage() {
           <div>
             <label className="block text-xs font-medium text-gray-400 mb-1.5 uppercase tracking-wider">Model</label>
             {selectedProvider && selectedProvider.models.length > 0 ? (
-              <select
-                value={model}
-                onChange={e => setModel(e.target.value)}
-                className="w-full px-4 py-2.5 bg-gray-900 border border-gray-800 rounded-lg text-white focus:outline-none focus:border-blue-500 text-sm transition"
-              >
-                {selectedProvider.models.map(m => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
+              <div>
+                <select
+                  value={selectedProvider.models.includes(model) ? model : ''}
+                  onChange={e => setModel(e.target.value)}
+                  className="w-full px-4 py-2.5 bg-gray-900 border border-gray-800 rounded-lg text-white focus:outline-none focus:border-blue-500 text-sm transition"
+                >
+                  {selectedProvider.models.map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                  <option value="">-- Custom model --</option>
+                </select>
+                {!selectedProvider.models.includes(model) && (
+                  <input
+                    type="text"
+                    value={model}
+                    onChange={e => setModel(e.target.value)}
+                    placeholder="Enter custom model name..."
+                    className="w-full mt-2 px-4 py-2.5 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 text-sm transition"
+                  />
+                )}
+              </div>
             ) : (
               <input
                 type="text"
@@ -177,18 +195,17 @@ export default function SettingsPage() {
             )}
           </div>
 
-          {/* Base URL (always shown for custom, hidden for others) */}
-          {provider === 'custom' && (
+          {/* Base URL */}
+          {(provider === 'custom' || provider === 'groq') && (
             <div>
               <label className="block text-xs font-medium text-gray-400 mb-1.5 uppercase tracking-wider">API Base URL</label>
               <input
                 type="text"
                 value={baseUrl}
                 onChange={e => setBaseUrl(e.target.value)}
-                placeholder="https://your-api.com/v1"
+                placeholder="https://api.groq.com/openai/v1"
                 className="w-full px-4 py-2.5 bg-gray-900 border border-gray-800 rounded-lg text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 text-sm transition"
               />
-              <p className="text-xs text-gray-600 mt-1.5">Must be OpenAI-compatible (supports /chat/completions endpoint)</p>
             </div>
           )}
 
@@ -245,10 +262,9 @@ export default function SettingsPage() {
           <div className="flex gap-3">
             <button
               onClick={handleSave}
-              disabled={saving}
-              className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 rounded-lg font-medium text-sm transition"
+              className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-sm transition"
             >
-              {saving ? 'Saving...' : saved ? 'Saved!' : 'Save Settings'}
+              {saved ? 'Saved!' : 'Save Settings'}
             </button>
             <button
               onClick={handleTest}
